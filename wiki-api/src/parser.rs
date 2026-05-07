@@ -5,7 +5,7 @@ use tracing::{trace, warn};
 use url::Url;
 
 use crate::{
-    document::{Data, HeaderKind, Raw, UnsupportedElement},
+    document::{Data, FigureData, HeaderKind, ImageData, Raw, UnsupportedElement},
     languages::Language,
     page::{
         link_data::{AnchorData, ExternalData, ExternalToInteralData, InternalData, MediaData},
@@ -69,13 +69,19 @@ impl WikipediaParser {
                         ignore_children = true;
                         Data::Unsupported(UnsupportedElement::Table)
                     }
-                    "image" => {
+                    "img" | "image" => {
                         ignore_children = true;
-                        Data::Unsupported(UnsupportedElement::Image)
+                        match self.parse_image(&attrs) {
+                            Some(image) => Data::Image(image),
+                            None => Data::Unsupported(UnsupportedElement::Image),
+                        }
                     }
                     "figure" => {
                         ignore_children = true;
-                        Data::Unsupported(UnsupportedElement::Figure)
+                        match self.parse_figure(node) {
+                            Some(figure) => Data::Figure(figure),
+                            None => Data::Unsupported(UnsupportedElement::Figure),
+                        }
                     }
                     "pre" => {
                         ignore_children = true;
@@ -274,6 +280,140 @@ impl WikipediaParser {
         index
     }
 
+    fn parse_image(&self, attrs: &[(String, String)]) -> Option<ImageData> {
+        let src = Self::attr(attrs, "src")
+            .or_else(|| Self::attr(attrs, "href"))
+            .or_else(|| Self::attr(attrs, "srcset").and_then(Self::first_srcset_url))?;
+
+        Some(ImageData {
+            url: self.resolve_url(src)?,
+            alt: Self::non_empty_attr(attrs, "alt"),
+            title: Self::non_empty_attr(attrs, "title"),
+        })
+    }
+
+    fn parse_figure(&self, node: &Handle) -> Option<FigureData> {
+        let image = self.find_first_image(node);
+        let caption = Self::find_figcaption_text(node);
+
+        if image.is_none() && caption.is_none() {
+            return None;
+        }
+
+        Some(FigureData { image, caption })
+    }
+
+    fn find_first_image(&self, node: &Handle) -> Option<ImageData> {
+        if let Some(attrs) = Self::element_attrs(node, &["img", "image"]) {
+            if let Some(image) = self.parse_image(&attrs) {
+                return Some(image);
+            }
+        }
+
+        for child in node.children.borrow().iter() {
+            if let Some(image) = self.find_first_image(child) {
+                return Some(image);
+            }
+        }
+
+        None
+    }
+
+    fn find_figcaption_text(node: &Handle) -> Option<String> {
+        if Self::element_attrs(node, &["figcaption"]).is_some() {
+            return Self::node_text(node);
+        }
+
+        for child in node.children.borrow().iter() {
+            if let Some(caption) = Self::find_figcaption_text(child) {
+                return Some(caption);
+            }
+        }
+
+        None
+    }
+
+    fn element_attrs(node: &Handle, names: &[&str]) -> Option<Vec<(String, String)>> {
+        let NodeData::Element {
+            ref name,
+            ref attrs,
+            ..
+        } = node.data
+        else {
+            return None;
+        };
+
+        let name = name.local.to_string();
+        if !names.iter().any(|candidate| *candidate == name) {
+            return None;
+        }
+
+        Some(
+            attrs
+                .borrow()
+                .iter()
+                .map(|attr| (attr.name.local.to_string(), attr.value.to_string()))
+                .collect(),
+        )
+    }
+
+    fn attr<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        attrs
+            .iter()
+            .find(|(attr_name, _)| attr_name == name)
+            .map(|(_, value)| value.trim())
+            .filter(|value| !value.is_empty())
+    }
+
+    fn non_empty_attr(attrs: &[(String, String)], name: &str) -> Option<String> {
+        Self::attr(attrs, name).map(ToOwned::to_owned)
+    }
+
+    fn first_srcset_url(srcset: &str) -> Option<&str> {
+        srcset
+            .split(',')
+            .find_map(|candidate| candidate.split_whitespace().next())
+    }
+
+    fn resolve_url(&self, value: &str) -> Option<Url> {
+        let value = if value.starts_with("//") {
+            format!("{}:{value}", self.endpoint.scheme())
+        } else {
+            value.to_string()
+        };
+
+        self.endpoint.join(&value).ok()
+    }
+
+    fn node_text(node: &Handle) -> Option<String> {
+        fn collect_text(node: &Handle, output: &mut String) {
+            match node.data {
+                NodeData::Text { ref contents } => {
+                    output.push_str(&contents.borrow());
+                    output.push(' ');
+                }
+                NodeData::Element { .. } | NodeData::Document => {
+                    for child in node.children.borrow().iter() {
+                        collect_text(child, output);
+                    }
+                }
+                NodeData::ProcessingInstruction { .. }
+                | NodeData::Doctype { .. }
+                | NodeData::Comment { .. } => {}
+            }
+        }
+
+        let mut text = String::new();
+        collect_text(node, &mut text);
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
     fn parse_section<'a>(
         &mut self,
         mut attrs: impl Iterator<Item = &'a (String, String)>,
@@ -399,6 +539,96 @@ impl WikipediaParser {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Parser, WikipediaParser};
+    use crate::{document::Data, languages::Language, Endpoint};
+
+    fn parse_nodes(html: &str) -> Vec<crate::document::Raw> {
+        WikipediaParser::parse_document(
+            html,
+            Endpoint::parse("https://en.wikipedia.org/w/api.php").unwrap(),
+            Language::default(),
+        )
+        .nodes()
+    }
+
+    #[test]
+    fn parses_image_with_alt_title_and_src() {
+        let nodes = parse_nodes(
+            r#"<section><img src="//upload.wikimedia.org/image.png" alt="Rocket" title="Rocket title"></section>"#,
+        );
+
+        let image = nodes
+            .iter()
+            .find_map(|node| match &node.data {
+                Data::Image(image) => Some(image),
+                _ => None,
+            })
+            .expect("image node");
+
+        assert_eq!(image.url.as_str(), "https://upload.wikimedia.org/image.png");
+        assert_eq!(image.alt.as_deref(), Some("Rocket"));
+        assert_eq!(image.title.as_deref(), Some("Rocket title"));
+    }
+
+    #[test]
+    fn parses_figure_caption_and_image() {
+        let nodes = parse_nodes(
+            r#"<section><figure><img src="/wiki/Special:FilePath/Rocket.jpg" alt="A rocket"><figcaption>Rocket launch caption</figcaption></figure></section>"#,
+        );
+
+        let figure = nodes
+            .iter()
+            .find_map(|node| match &node.data {
+                Data::Figure(figure) => Some(figure),
+                _ => None,
+            })
+            .expect("figure node");
+
+        assert_eq!(figure.caption.as_deref(), Some("Rocket launch caption"));
+        assert_eq!(
+            figure.image.as_ref().map(|image| image.alt.as_deref()),
+            Some(Some("A rocket"))
+        );
+    }
+
+    #[test]
+    fn parses_caption_only_figure() {
+        let nodes = parse_nodes(
+            "<section><figure><figcaption>Only caption</figcaption></figure></section>",
+        );
+
+        let figure = nodes
+            .iter()
+            .find_map(|node| match &node.data {
+                Data::Figure(figure) => Some(figure),
+                _ => None,
+            })
+            .expect("figure node");
+
+        assert!(figure.image.is_none());
+        assert_eq!(figure.caption.as_deref(), Some("Only caption"));
+    }
+
+    #[test]
+    fn parses_first_srcset_url() {
+        let nodes = parse_nodes(
+            r#"<section><img srcset="//upload.wikimedia.org/a.png 1x, //upload.wikimedia.org/b.png 2x" alt="Rocket"></section>"#,
+        );
+
+        let image = nodes
+            .iter()
+            .find_map(|node| match &node.data {
+                Data::Image(image) => Some(image),
+                _ => None,
+            })
+            .expect("image node");
+
+        assert_eq!(image.url.as_str(), "https://upload.wikimedia.org/a.png");
     }
 }
 

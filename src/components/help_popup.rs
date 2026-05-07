@@ -126,7 +126,7 @@ impl HelpPopupComponent {
                 "select previous link"
             ),
             convert_binding!(config.bindings.page.select_next_link, "select next link"),
-            convert_binding!(config.bindings.page.open_link, "open link"),
+            convert_binding!(config.bindings.page.open_link, "open link or image"),
             convert_binding!(
                 config.bindings.page.toggle_page_language_selection,
                 "toggle page language"

@@ -1,4 +1,5 @@
 use serde_repr::{Deserialize_repr, Serialize_repr};
+use url::Url;
 
 use crate::page::Link;
 
@@ -65,6 +66,8 @@ pub enum Data {
     Linebreak,
 
     Link(Link),
+    Image(ImageData),
+    Figure(FigureData),
     #[default]
     Unknown,
 
@@ -79,6 +82,19 @@ pub enum UnsupportedElement {
     Figure,
     MathElement,
     PreformattedText,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImageData {
+    pub url: Url,
+    pub alt: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FigureData {
+    pub image: Option<ImageData>,
+    pub caption: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

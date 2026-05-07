@@ -15,6 +15,7 @@ use crate::{
     action::{Action, ActionPacket, ActionResult},
     components::{
         help_popup::HelpPopupComponent,
+        image_popup::{ImagePopupComponent, ImageSupport},
         logger::LoggerComponent,
         message_popup::MessagePopupComponent,
         page_viewer::PageViewer,
@@ -46,6 +47,7 @@ pub struct AppComponent {
     popups: Vec<Box<dyn Component + Send>>,
     config: Arc<Config>,
     theme: Arc<Theme>,
+    image_support: ImageSupport,
 
     context: u8,
     prev_context: u8,
@@ -78,6 +80,10 @@ impl AppComponent {
 
         self.search_bar.render(f, search_bar_area);
         area
+    }
+
+    pub fn set_image_support(&mut self, image_support: ImageSupport) {
+        self.image_support = image_support;
     }
 }
 
@@ -249,6 +255,14 @@ impl Component for AppComponent {
                         *cb,
                         self.theme.clone(),
                     )))
+            }
+            Action::PopupImage(figure) => {
+                self.popups.push(Box::new(ImagePopupComponent::new(
+                    figure,
+                    self.config.clone(),
+                    self.theme.clone(),
+                    self.image_support.clone(),
+                )));
             }
             _ => {
                 if let Some(ref mut popup) = self.popups.last_mut() {

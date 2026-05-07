@@ -10,7 +10,7 @@ use ratatui::{
 };
 use tracing::{debug, info, warn};
 use wiki_api::{
-    document::{Data, Node},
+    document::{Data, FigureData, Node},
     page::{Link, Page, Section},
 };
 
@@ -300,6 +300,13 @@ impl PageComponent {
         self.page.content.nth(self.selected.0)
     }
 
+    fn is_selectable(node: Node<'_>) -> bool {
+        matches!(
+            node.data(),
+            Data::Link(_) | Data::Image(_) | Data::Figure(_)
+        )
+    }
+
     fn select_first(&mut self) {
         if self.page.content.nth(0).is_none() {
             return;
@@ -311,7 +318,7 @@ impl PageComponent {
             .nth(0)
             .unwrap()
             .descendants()
-            .find(|node| matches!(node.data(), &Data::Link(_)));
+            .find(|node| Self::is_selectable(*node));
 
         if let Some(node) = selectable_node {
             self.select_node(node.index());
@@ -330,7 +337,7 @@ impl PageComponent {
             .nth(0)
             .unwrap()
             .descendants()
-            .filter(|node| matches!(node.data(), &Data::Link(_)) && node.index() > self.selected.1)
+            .filter(|node| Self::is_selectable(*node) && node.index() > self.selected.1)
             .last();
 
         if let Some(node) = selectable_node {
@@ -350,7 +357,7 @@ impl PageComponent {
             .nth(0)
             .unwrap()
             .descendants()
-            .find(|node| matches!(node.data(), &Data::Link(_)) && self.selected.1 < node.index());
+            .find(|node| Self::is_selectable(*node) && self.selected.1 < node.index());
 
         if let Some(node) = selectable_node {
             self.select_node(node.index());
@@ -369,7 +376,7 @@ impl PageComponent {
             .nth(0)
             .unwrap()
             .descendants()
-            .filter(|node| matches!(node.data(), &Data::Link(_)) && node.index() < self.selected.0)
+            .filter(|node| Self::is_selectable(*node) && node.index() < self.selected.0)
             .last();
 
         if let Some(node) = selectable_node {
@@ -515,15 +522,23 @@ impl PageComponent {
         }
     }
 
-    fn open_link(&self) -> ActionResult {
+    fn open_selected(&self) -> ActionResult {
         let index = self.selected.0;
         let node = Node::new(&self.page.content, index).unwrap();
         let data = node.data().to_owned();
 
         let link = match data {
             Data::Link(link) => link,
+            Data::Image(image) => {
+                return Action::PopupImage(FigureData {
+                    image: Some(image),
+                    caption: None,
+                })
+                .into()
+            }
+            Data::Figure(figure) => return Action::PopupImage(figure).into(),
             _ => {
-                warn!("tried to open an element that is not a link");
+                warn!("tried to open an element that is not selectable");
                 return ActionResult::Ignored;
             }
         };
@@ -674,7 +689,7 @@ impl Component for PageComponent {
         matches_binding!(select_prev_link, Action::Page(PageAction::SelectPrevLink));
         matches_binding!(select_next_link, Action::Page(PageAction::SelectNextLink));
 
-        matches_binding!(open_link, self.open_link());
+        matches_binding!(open_link, self.open_selected());
         matches_binding!(toggle_zen_mode, {
             self.is_zen_mode = !self.is_zen_mode;
             ActionResult::Ignored

@@ -13,6 +13,7 @@ use crate::{
 };
 
 pub mod help_popup;
+pub mod image_popup;
 pub mod logger;
 pub mod message_popup;
 pub mod page;

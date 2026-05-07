@@ -153,7 +153,7 @@ continue_search = "c"
 | `select_last_link`               | Select the last link in the page                                 | ++shift+right++       |
 | `select_prev_link`               | Select the previous link in the page                             | ++left++              |
 | `select_next_link`               | Select the next link in the page                                 | ++right++             |
-| `open_link`                      | Open the currently selected link                                 | ++enter++             |
+| `open_link`                      | Open the currently selected link or image                         | ++enter++             |
 | `toggle_page_language_selection` | Toggle the popup for changing the page language                  | ++f3++                |
 | `toggle_zen_mode`                | Toggle the zen-mode for the page                                 | ++f4++                |
 | `toggle_toc`                     | Switch the focus to the toc (or page)                            | ++tab++ / ++backtab++ |

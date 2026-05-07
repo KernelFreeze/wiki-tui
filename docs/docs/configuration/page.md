@@ -119,6 +119,34 @@ Or if you want to have a custom beginning
 page.toc.item_format = "# {TEXT}"
 ```
 
+## Images
+
+:octicons-milestone-16: Default: `auto`
+
+wiki-tui shows image and figure placeholders in the article text. The placeholder includes the
+figure caption, image alt text, or the image URL. Press the normal open binding on a selected image
+placeholder to open the image layer.
+
+By default, images are rendered only when the terminal reports Kitty, Sixel, or iTerm2 image support.
+If the terminal does not support one of those protocols, wiki-tui keeps showing the caption, alt
+text, and source URL instead.
+
+```toml
+page.images.enabled = "auto"
+```
+
+The available values are:
+
+* `auto`: render images only when a supported terminal image protocol is detected
+* `always`: try to render images, but still fall back to metadata if rendering is unsupported
+* `never`: never render images; keep the metadata-only image layer
+
+Unicode block rendering is disabled by default. To opt into the block fallback, set:
+
+```toml
+page.images.block_fallback = true
+```
+
 ## Zen Mode
 
 [:octicons-tag-24: 0.9.0][release-0.9.0] · :octicons-milestone-16: Default `""` 

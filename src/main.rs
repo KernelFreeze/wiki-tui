@@ -7,7 +7,7 @@ use wiki_tui::{
     action::{Action, ActionPacket, ActionResult},
     app::AppComponent,
     cli::match_cli,
-    components::Component,
+    components::{image_popup::ImageSupport, Component},
     config::{load_config, load_theme, Config, Theme},
     event::EventHandler,
     logging::initialize_logging,
@@ -53,13 +53,21 @@ async fn main() -> Result<()> {
             Theme::default()
         });
 
-    app_component
-        .lock()
-        .await
-        .init(action_tx.clone(), Arc::new(config), Arc::new(theme))?;
-
     let mut tui = Tui::new()?;
     tui.enter()?;
+
+    let config = Arc::new(config);
+    let theme = Arc::new(theme);
+    let image_support = ImageSupport::detect(&config.page.images);
+
+    {
+        let mut app_component = app_component.lock().await;
+        app_component.set_image_support(image_support);
+        if let Err(error) = app_component.init(action_tx.clone(), config.clone(), theme.clone()) {
+            tui.exit()?;
+            return Err(error);
+        }
+    }
 
     let _action_tx = action_tx.clone();
     let _root = app_component.clone();

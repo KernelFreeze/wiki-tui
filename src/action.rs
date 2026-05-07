@@ -2,6 +2,7 @@ use std::fmt::Debug;
 
 use tokio::sync::mpsc;
 use wiki_api::{
+    document::FigureData,
     languages::Language,
     page::{LanguageLink, Link, Page},
     search::{Search, SearchResult},
@@ -29,6 +30,7 @@ pub enum Action {
     PopupError(String),
     /// PopupError(Title, Content, Callback)
     PopupDialog(String, String, Box<ActionPacket>),
+    PopupImage(FigureData),
     PopPopup,
 
     SwitchContextSearch,

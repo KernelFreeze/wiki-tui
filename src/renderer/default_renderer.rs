@@ -2,7 +2,7 @@ use ratatui::style::{Color, Modifier, Style};
 use textwrap::wrap_algorithms::{wrap_optimal_fit, Penalties};
 use tracing::warn;
 use wiki_api::{
-    document::{Data, Document, HeaderKind, Node, UnsupportedElement},
+    document::{Data, Document, FigureData, HeaderKind, ImageData, Node, UnsupportedElement},
     page::Link,
 };
 
@@ -529,6 +529,61 @@ impl<'a> Renderer {
         self.add_whitespace();
     }
 
+    fn render_image(&mut self, node: Node<'a>, image: &ImageData) {
+        self.render_image_block(
+            node,
+            Self::image_text(Some(image), None),
+            Some(image.url.as_str()),
+        );
+    }
+
+    fn render_figure(&mut self, node: Node<'a>, figure: &FigureData) {
+        self.render_image_block(
+            node,
+            Self::image_text(figure.image.as_ref(), figure.caption.as_deref()),
+            figure.image.as_ref().map(|image| image.url.as_str()),
+        );
+    }
+
+    fn image_text(image: Option<&ImageData>, caption: Option<&str>) -> String {
+        let label = caption
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                image
+                    .and_then(|image| image.alt.as_deref())
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .or_else(|| {
+                image
+                    .and_then(|image| image.title.as_deref())
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .or_else(|| image.map(|image| image.url.as_str()))
+            .unwrap_or("No description available");
+
+        format!("[Image] {label}")
+    }
+
+    fn render_image_block(&mut self, node: Node<'a>, label: String, url: Option<&str>) {
+        self.ensure_empty_line();
+        self.links.push((self.rendered_lines.len(), node.index()));
+
+        self.add_modifier(Modifier::ITALIC);
+        self.set_text_fg(Color::Gray);
+        self.render_string(&label, node.index());
+        self.clear_line();
+
+        if let Some(url) = url {
+            self.set_text_fg(Color::Blue);
+            self.render_string(&format!("Source: {url}"), node.index());
+            self.clear_line();
+        }
+
+        self.reset_text_fg();
+        self.remove_modifier(Modifier::ITALIC);
+        self.add_empty_line();
+    }
+
     fn render_unsupported_element(
         &mut self,
         inline: bool,
@@ -591,6 +646,8 @@ impl<'a> Renderer {
             Data::Italic => self.render_italic(node),
             Data::Linebreak => self.render_linebreak(node),
             Data::Link(link) => self.render_link(node, link.clone()),
+            Data::Image(image) => self.render_image(node, image),
+            Data::Figure(figure) => self.render_figure(node, figure),
             Data::Unknown => self.render_children(node),
             Data::Unsupported(element) => {
                 self.render_unsupported_element(false, element, node.index())
@@ -604,4 +661,97 @@ impl<'a> Renderer {
 
 pub fn render_document(document: &Document, width: u16) -> RenderedDocument {
     Renderer::render_document(document, width)
+}
+
+#[cfg(test)]
+mod tests {
+    use wiki_api::document::{Data, Document, FigureData, ImageData, Raw};
+    use wiki_api::Endpoint;
+
+    use super::render_document;
+
+    fn document_with(data: Data) -> Document {
+        Document {
+            nodes: vec![Raw {
+                index: 0,
+                parent: None,
+                prev: None,
+                next: None,
+                first_child: None,
+                last_child: None,
+                data,
+            }],
+        }
+    }
+
+    fn rendered_lines(document: &Document) -> Vec<String> {
+        render_document(document, 120)
+            .lines
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|word| {
+                        format!(
+                            "{}{}",
+                            word.content,
+                            " ".repeat(word.whitespace_width as usize)
+                        )
+                    })
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn image_data(alt: Option<&str>) -> ImageData {
+        ImageData {
+            url: Endpoint::parse("https://upload.wikimedia.org/image.png").unwrap(),
+            alt: alt.map(ToOwned::to_owned),
+            title: None,
+        }
+    }
+
+    #[test]
+    fn renders_figure_caption_instead_of_unsupported_element() {
+        let document = document_with(Data::Figure(FigureData {
+            image: Some(image_data(Some("Rocket alt"))),
+            caption: Some("Rocket launch caption".to_string()),
+        }));
+
+        let text = rendered_lines(&document).join("\n");
+
+        assert!(text.contains("[Image] Rocket launch caption"));
+        assert!(text.contains("Source: https://upload.wikimedia.org/image.png"));
+        assert!(!text.contains("Unsupported Element"));
+    }
+
+    #[test]
+    fn renders_image_alt_text_when_no_caption_exists() {
+        let document = document_with(Data::Image(image_data(Some("Rocket alt"))));
+
+        let text = rendered_lines(&document).join("\n");
+
+        assert!(text.contains("[Image] Rocket alt"));
+    }
+
+    #[test]
+    fn renders_image_url_when_no_text_exists() {
+        let document = document_with(Data::Image(image_data(None)));
+
+        let text = rendered_lines(&document).join("\n");
+
+        assert!(text.contains("[Image] https://upload.wikimedia.org/image.png"));
+        assert!(text.contains("Source: https://upload.wikimedia.org/image.png"));
+    }
+
+    #[test]
+    fn rendered_image_is_selectable() {
+        let document = document_with(Data::Image(image_data(Some("Rocket alt"))));
+        let rendered = render_document(&document, 120);
+
+        let (y, index) = rendered.links.first().copied().expect("selectable image");
+        assert_eq!(index, 0);
+        assert!(rendered.lines[y]
+            .iter()
+            .any(|word| word.content.contains("Rocket")));
+    }
 }

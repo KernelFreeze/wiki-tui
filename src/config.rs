@@ -146,6 +146,13 @@ fn override_page_config(config: &mut PageConfig, user_config: UserPageConfig) {
         });
     }
 
+    if let Some(user_images) = user_config.images {
+        override_options!(config.images, user_images::{
+            enabled,
+            block_fallback
+        });
+    }
+
     override_options!(config, user_config::padding);
 
     if let Some(user_zen) = user_config.zen_mode {
@@ -280,6 +287,7 @@ pub struct Config {
 
 pub struct PageConfig {
     pub toc: TocConfig,
+    pub images: PageImagesConfig,
     pub padding: Padding,
 
     pub default_zen: bool,
@@ -348,6 +356,19 @@ pub struct TocConfig {
     item_format: String,
 
     pub enable_scrolling: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PageImagesEnabled {
+    Auto,
+    Always,
+    Never,
+}
+
+pub struct PageImagesConfig {
+    pub enabled: PageImagesEnabled,
+    pub block_fallback: bool,
 }
 
 #[derive(Deserialize)]
@@ -558,6 +579,10 @@ impl Config {
 
                     enable_scrolling: true,
                 },
+                images: PageImagesConfig {
+                    enabled: PageImagesEnabled::Auto,
+                    block_fallback: false,
+                },
                 padding: Padding::ZERO,
 
                 default_zen: false,
@@ -661,6 +686,7 @@ struct UserConfig {
 #[derive(Deserialize)]
 struct UserPageConfig {
     toc: Option<UserTocConfig>,
+    images: Option<UserPageImagesConfig>,
     padding: Option<PaddingConfig>,
 
     zen_mode: Option<UserZenModeConfig>,
@@ -707,6 +733,12 @@ struct UserTocConfig {
     item_format: Option<String>,
 
     enable_scrolling: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct UserPageImagesConfig {
+    enabled: Option<PageImagesEnabled>,
+    block_fallback: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
