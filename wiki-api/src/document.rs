@@ -113,6 +113,8 @@ pub struct TableRowData {
 pub struct TableCellData {
     pub header: bool,
     pub text: String,
+    #[serde(default)]
+    pub images: Vec<ImageData>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

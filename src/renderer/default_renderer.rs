@@ -3,13 +3,13 @@ use textwrap::wrap_algorithms::{wrap_optimal_fit, Penalties};
 use tracing::warn;
 use wiki_api::{
     document::{
-        Data, Document, FigureData, HeaderKind, ImageData, Node, TableData, TableRowData,
-        UnsupportedElement,
+        Data, Document, FigureData, HeaderKind, ImageData, Node, TableCellData, TableData,
+        TableRowData, UnsupportedElement,
     },
     page::Link,
 };
 
-use crate::renderer::Word;
+use crate::renderer::{SelectionTarget, Word};
 
 use super::RenderedDocument;
 
@@ -21,9 +21,15 @@ const BLOCKQUOTE_PADDING: u8 = 4;
 const LIST_PADDING: u8 = 1;
 const LIST_PREFIX: char = '-';
 
+#[derive(Clone)]
+struct TableCellSegment {
+    content: String,
+    selection_target: Option<SelectionTarget>,
+}
+
 struct Renderer {
     rendered_lines: Vec<Vec<Word>>,
-    links: Vec<(usize, usize)>,
+    links: Vec<(usize, SelectionTarget)>,
 
     current_line: Vec<Word>,
     width: u16,
@@ -109,6 +115,7 @@ impl<'a> Renderer {
             index: usize::MAX,
             content: String::new(),
             style: Style::default(),
+            selection_target: None,
             width: 0.0,
             whitespace_width: n as f64,
             penalty_width: 0.0,
@@ -169,6 +176,7 @@ impl<'a> Renderer {
                     index: usize::MAX,
                     content: prefix.to_string(),
                     style: Style::default(),
+                    selection_target: None,
                     width: 1.0,
                     whitespace_width: 1.0,
                     penalty_width: 0.0,
@@ -197,6 +205,7 @@ impl<'a> Renderer {
                         index: usize::MAX,
                         content: prefix.to_string(),
                         style: Style::default(),
+                        selection_target: None,
                         width: 1.0,
                         whitespace_width: 1.0,
                         penalty_width: 0.0,
@@ -270,6 +279,7 @@ impl<'a> Renderer {
             index: usize::MAX,
             content: "─".repeat(remaining_width),
             style: self.text_style,
+            selection_target: None,
             width: remaining_width as f64,
             whitespace_width: 0.0,
             penalty_width: 0.0,
@@ -351,6 +361,7 @@ impl<'a> Renderer {
                 index,
                 content: word.to_string(),
                 style: self.text_style,
+                selection_target: None,
                 width: word.chars().count() as f64,
                 whitespace_width: 1.0,
                 penalty_width: 0.0,
@@ -431,6 +442,7 @@ impl<'a> Renderer {
             index: usize::MAX,
             content: format!("{}{LIST_PREFIX}", " ".repeat(self.left_padding as usize)),
             style: Style::default(),
+            selection_target: None,
             width: 1.0,
             whitespace_width: 1.0,
             penalty_width: 0.0,
@@ -481,7 +493,10 @@ impl<'a> Renderer {
     }
 
     fn render_link(&mut self, node: Node<'a>, link: Link) {
-        self.links.push((self.rendered_lines.len(), node.index()));
+        self.links.push((
+            self.rendered_lines.len(),
+            SelectionTarget::DocumentNode(node.index()),
+        ));
 
         match link {
             Link::Internal(_) => self.render_wiki_link(node),
@@ -569,7 +584,10 @@ impl<'a> Renderer {
 
     fn render_image_block(&mut self, node: Node<'a>, label: String, url: Option<&str>) {
         self.ensure_empty_line();
-        self.links.push((self.rendered_lines.len(), node.index()));
+        self.links.push((
+            self.rendered_lines.len(),
+            SelectionTarget::DocumentNode(node.index()),
+        ));
 
         self.add_modifier(Modifier::ITALIC);
         self.set_text_fg(Color::Gray);
@@ -606,18 +624,14 @@ impl<'a> Renderer {
         }
 
         let separator = Self::format_table_separator(&widths);
-        for row in table.rows.iter() {
+        for (row_index, row) in table.rows.iter().enumerate() {
             let row_style = if Self::is_header_row(row) {
                 self.text_style.add_modifier(Modifier::BOLD)
             } else {
                 self.text_style
             };
 
-            self.push_rendered_line(
-                Self::format_table_row(row, &widths),
-                node.index(),
-                row_style,
-            );
+            self.render_table_row(node.index(), row_index, row, &widths, row_style);
 
             if Self::is_header_row(row) {
                 self.push_rendered_line(separator.clone(), node.index(), self.text_style);
@@ -644,7 +658,11 @@ impl<'a> Renderer {
 
         for row in table.rows.iter() {
             for (index, cell) in row.cells.iter().enumerate() {
-                let cell_width = cell.text.chars().count().max(1).min(max_cell_width);
+                let cell_width = Self::table_cell_text(cell)
+                    .chars()
+                    .count()
+                    .max(1)
+                    .min(max_cell_width);
                 widths[index] = widths[index].max(cell_width);
             }
         }
@@ -666,22 +684,158 @@ impl<'a> Renderer {
         row.cells.iter().any(|cell| cell.header)
     }
 
-    fn format_table_row(row: &TableRowData, widths: &[usize]) -> String {
-        let mut line = String::from("|");
+    fn table_cell_text(cell: &TableCellData) -> String {
+        let mut parts: Vec<String> = cell
+            .images
+            .iter()
+            .map(|image| Self::image_text(Some(image), None))
+            .collect();
 
-        for (index, width) in widths.iter().enumerate() {
-            let text = row
-                .cells
-                .get(index)
-                .map(|cell| cell.text.as_str())
-                .unwrap_or("");
-            line.push(' ');
-            line.push_str(&Self::fit_table_cell(text, *width));
-            line.push(' ');
-            line.push('|');
+        if !cell.text.is_empty() {
+            parts.push(cell.text.clone());
         }
 
-        line
+        parts.join(" ")
+    }
+
+    fn render_table_row(
+        &mut self,
+        table_index: usize,
+        row_index: usize,
+        row: &TableRowData,
+        widths: &[usize],
+        style: Style,
+    ) {
+        let y = self.rendered_lines.len();
+        let mut words = Vec::new();
+
+        if self.left_padding > 0 {
+            words.push(Self::table_word(
+                " ".repeat(self.left_padding as usize),
+                table_index,
+                style,
+                None,
+            ));
+        }
+
+        words.push(Self::table_word("|".to_string(), table_index, style, None));
+
+        for (column_index, width) in widths.iter().enumerate() {
+            words.push(Self::table_word(" ".to_string(), table_index, style, None));
+
+            let segments = row.cells.get(column_index).map_or_else(
+                || {
+                    vec![TableCellSegment {
+                        content: " ".repeat(*width),
+                        selection_target: None,
+                    }]
+                },
+                |cell| {
+                    Self::fit_table_cell_segments(
+                        table_index,
+                        row_index,
+                        column_index,
+                        cell,
+                        *width,
+                    )
+                },
+            );
+
+            for segment in segments {
+                if segment.content.is_empty() {
+                    continue;
+                }
+
+                if let Some(selection_target) = segment.selection_target.clone() {
+                    self.links.push((y, selection_target.clone()));
+                }
+
+                words.push(Self::table_word(
+                    segment.content,
+                    table_index,
+                    style,
+                    segment.selection_target,
+                ));
+            }
+
+            words.push(Self::table_word(" |".to_string(), table_index, style, None));
+        }
+
+        self.rendered_lines.push(words);
+    }
+
+    fn fit_table_cell_segments(
+        table_index: usize,
+        row_index: usize,
+        column_index: usize,
+        cell: &TableCellData,
+        width: usize,
+    ) -> Vec<TableCellSegment> {
+        let mut segments = Vec::new();
+
+        for (image_index, image) in cell.images.iter().enumerate() {
+            if !segments.is_empty() {
+                segments.push(TableCellSegment {
+                    content: " ".to_string(),
+                    selection_target: None,
+                });
+            }
+
+            segments.push(TableCellSegment {
+                content: Self::image_text(Some(image), None),
+                selection_target: Some(SelectionTarget::TableCellImage {
+                    table_index,
+                    row: row_index,
+                    column: column_index,
+                    image_index,
+                    image: image.clone(),
+                }),
+            });
+        }
+
+        if !cell.text.is_empty() {
+            if !segments.is_empty() {
+                segments.push(TableCellSegment {
+                    content: " ".to_string(),
+                    selection_target: None,
+                });
+            }
+
+            segments.push(TableCellSegment {
+                content: cell.text.clone(),
+                selection_target: None,
+            });
+        }
+
+        let mut fitted = Vec::new();
+        let mut remaining = width;
+
+        for segment in segments {
+            if remaining == 0 {
+                break;
+            }
+
+            let content: String = segment.content.chars().take(remaining).collect();
+            let content_width = content.chars().count();
+            if content_width == 0 {
+                continue;
+            }
+
+            remaining = remaining.saturating_sub(content_width);
+            fitted.push(TableCellSegment {
+                content,
+                selection_target: segment.selection_target,
+            });
+        }
+
+        if remaining > 0 {
+            fitted.push(TableCellSegment {
+                content: " ".repeat(remaining),
+                selection_target: None,
+            });
+        }
+
+        fitted
     }
 
     fn format_table_separator(widths: &[usize]) -> String {
@@ -697,17 +851,6 @@ impl<'a> Renderer {
         line
     }
 
-    fn fit_table_cell(text: &str, width: usize) -> String {
-        let mut value: String = text.chars().take(width).collect();
-        let value_width = value.chars().count();
-
-        if value_width < width {
-            value.push_str(&" ".repeat(width - value_width));
-        }
-
-        value
-    }
-
     fn push_rendered_line(&mut self, line: String, index: usize, style: Style) {
         let content = format!("{}{}", " ".repeat(self.left_padding as usize), line);
         let width = content.chars().count() as f64;
@@ -716,11 +859,31 @@ impl<'a> Renderer {
             index,
             content,
             style,
+            selection_target: None,
             width,
             whitespace_width: 0.0,
             penalty_width: 0.0,
         });
         self.clear_line();
+    }
+
+    fn table_word(
+        content: String,
+        index: usize,
+        style: Style,
+        selection_target: Option<SelectionTarget>,
+    ) -> Word {
+        let width = content.chars().count() as f64;
+
+        Word {
+            index,
+            content,
+            style,
+            selection_target,
+            width,
+            whitespace_width: 0.0,
+            penalty_width: 0.0,
+        }
     }
 
     fn render_unsupported_element(
@@ -805,6 +968,7 @@ pub fn render_document(document: &Document, width: u16) -> RenderedDocument {
 
 #[cfg(test)]
 mod tests {
+    use crate::renderer::SelectionTarget;
     use wiki_api::document::{
         Data, Document, FigureData, ImageData, Raw, TableCellData, TableData, TableRowData,
     };
@@ -830,6 +994,15 @@ mod tests {
         TableCellData {
             header,
             text: text.to_string(),
+            images: Vec::new(),
+        }
+    }
+
+    fn image_cell(header: bool, text: &str, image: ImageData) -> TableCellData {
+        TableCellData {
+            header,
+            text: text.to_string(),
+            images: vec![image],
         }
     }
 
@@ -922,11 +1095,42 @@ mod tests {
         let document = document_with(Data::Image(image_data(Some("Rocket alt"))));
         let rendered = render_document(&document, 120);
 
-        let (y, index) = rendered.links.first().copied().expect("selectable image");
-        assert_eq!(index, 0);
+        let (y, target) = rendered.links.first().cloned().expect("selectable image");
+        assert_eq!(target, SelectionTarget::DocumentNode(0));
         assert!(rendered.lines[y]
             .iter()
             .any(|word| word.content.contains("Rocket")));
+    }
+
+    #[test]
+    fn rendered_table_cell_image_is_selectable() {
+        let image = image_data(Some("Rocket alt"));
+        let document = document_with(Data::Table(TableData {
+            caption: None,
+            rows: vec![row(vec![image_cell(false, "Launch", image.clone())])],
+        }));
+        let rendered = render_document(&document, 120);
+
+        let (y, target) = rendered
+            .links
+            .iter()
+            .find(|(_, target)| matches!(target, SelectionTarget::TableCellImage { .. }))
+            .cloned()
+            .expect("selectable table image");
+
+        assert_eq!(
+            target,
+            SelectionTarget::TableCellImage {
+                table_index: 0,
+                row: 0,
+                column: 0,
+                image_index: 0,
+                image,
+            }
+        );
+        assert!(rendered.lines[y].iter().any(|word| {
+            word.selection_target.as_ref() == Some(&target) && word.content.contains("Rocket")
+        }));
     }
 
     #[test]

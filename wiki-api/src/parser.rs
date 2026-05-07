@@ -70,7 +70,7 @@ impl WikipediaParser {
 
                     "table" => {
                         ignore_children = true;
-                        Data::Table(Self::parse_table(node))
+                        Data::Table(self.parse_table(node))
                     }
                     "img" | "image" => {
                         ignore_children = true;
@@ -388,16 +388,17 @@ impl WikipediaParser {
         self.endpoint.join(&value).ok()
     }
 
-    fn parse_table(node: &Handle) -> TableData {
+    fn parse_table(&self, node: &Handle) -> TableData {
         let mut caption = None;
         let mut rows = Vec::new();
 
-        Self::collect_table_parts(node, true, &mut caption, &mut rows);
+        self.collect_table_parts(node, true, &mut caption, &mut rows);
 
         TableData { caption, rows }
     }
 
     fn collect_table_parts(
+        &self,
         node: &Handle,
         is_root: bool,
         caption: &mut Option<String>,
@@ -412,43 +413,71 @@ impl WikipediaParser {
                     }
                 }
                 Some("tr") => {
-                    if let Some(row) = Self::parse_table_row(child) {
+                    if let Some(row) = self.parse_table_row(child) {
                         rows.push(row);
                     }
                 }
                 Some("thead" | "tbody" | "tfoot") => {
-                    Self::collect_table_parts(child, false, caption, rows);
+                    self.collect_table_parts(child, false, caption, rows);
                 }
                 _ => {
-                    Self::collect_table_parts(child, false, caption, rows);
+                    self.collect_table_parts(child, false, caption, rows);
                 }
             }
         }
     }
 
-    fn parse_table_row(node: &Handle) -> Option<TableRowData> {
+    fn parse_table_row(&self, node: &Handle) -> Option<TableRowData> {
         let cells: Vec<TableCellData> = node
             .children
             .borrow()
             .iter()
             .filter_map(|child| match Self::element_name(child).as_deref() {
-                Some("th") => Some(TableCellData {
-                    header: true,
-                    text: Self::node_text(child).unwrap_or_default(),
-                }),
-                Some("td") => Some(TableCellData {
-                    header: false,
-                    text: Self::node_text(child).unwrap_or_default(),
-                }),
+                Some("th") => Some(self.parse_table_cell(child, true)),
+                Some("td") => Some(self.parse_table_cell(child, false)),
                 _ => None,
             })
             .collect();
 
-        if cells.is_empty() || cells.iter().all(|cell| cell.text.is_empty()) {
+        if cells.is_empty()
+            || cells
+                .iter()
+                .all(|cell| cell.text.is_empty() && cell.images.is_empty())
+        {
             return None;
         }
 
         Some(TableRowData { cells })
+    }
+
+    fn parse_table_cell(&self, node: &Handle, header: bool) -> TableCellData {
+        TableCellData {
+            header,
+            text: Self::node_text(node).unwrap_or_default(),
+            images: self.node_images(node),
+        }
+    }
+
+    fn node_images(&self, node: &Handle) -> Vec<ImageData> {
+        let mut images = Vec::new();
+        self.collect_node_images(node, &mut images);
+        images
+    }
+
+    fn collect_node_images(&self, node: &Handle, images: &mut Vec<ImageData>) {
+        if matches!(Self::element_name(node).as_deref(), Some("table")) {
+            return;
+        }
+
+        if let Some(attrs) = Self::element_attrs(node, &["img", "image"]) {
+            if let Some(image) = self.parse_image(&attrs) {
+                images.push(image);
+            }
+        }
+
+        for child in node.children.borrow().iter() {
+            self.collect_node_images(child, images);
+        }
     }
 
     fn element_name(node: &Handle) -> Option<String> {
@@ -741,6 +770,60 @@ mod tests {
         assert!(table.rows[0].cells.iter().all(|cell| cell.header));
         assert_eq!(table.rows[0].cells[0].text, "Name");
         assert_eq!(table.rows[1].cells[0].text, "Earth");
+    }
+
+    #[test]
+    fn preserves_table_cell_image_metadata() {
+        let nodes = parse_nodes(
+            r#"
+            <table>
+                <tr>
+                    <td><img src="//upload.wikimedia.org/rocket.png" alt="Rocket" title="Rocket title">Launch</td>
+                </tr>
+            </table>
+            "#,
+        );
+
+        let table = nodes
+            .iter()
+            .find_map(|node| match &node.data {
+                Data::Table(table) => Some(table),
+                _ => None,
+            })
+            .expect("table node");
+        let cell = &table.rows[0].cells[0];
+
+        assert_eq!(cell.text, "Launch");
+        assert_eq!(cell.images.len(), 1);
+        assert_eq!(
+            cell.images[0].url.as_str(),
+            "https://upload.wikimedia.org/rocket.png"
+        );
+        assert_eq!(cell.images[0].alt.as_deref(), Some("Rocket"));
+        assert_eq!(cell.images[0].title.as_deref(), Some("Rocket title"));
+    }
+
+    #[test]
+    fn keeps_image_only_table_rows() {
+        let nodes = parse_nodes(
+            r#"
+            <table>
+                <tr><td><img src="//upload.wikimedia.org/rocket.png" alt="Rocket"></td></tr>
+            </table>
+            "#,
+        );
+
+        let table = nodes
+            .iter()
+            .find_map(|node| match &node.data {
+                Data::Table(table) => Some(table),
+                _ => None,
+            })
+            .expect("table node");
+
+        assert_eq!(table.rows.len(), 1);
+        assert_eq!(table.rows[0].cells[0].text, "");
+        assert_eq!(table.rows[0].cells[0].images.len(), 1);
     }
 
     #[test]

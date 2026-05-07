@@ -19,7 +19,7 @@ use crate::{
     components::Component,
     config::{Config, Theme, TocConfigPosition, TocConfigTitle, ZenModeComponents},
     has_modifier,
-    renderer::{default_renderer::render_document, RenderedDocument},
+    renderer::{default_renderer::render_document, RenderedDocument, SelectionTarget, Word},
     terminal::Frame,
     ui::padded_rect,
 };
@@ -85,6 +85,8 @@ pub struct PageComponent {
     render_cache: HashMap<u16, RenderedDocument>,
     viewport: Rect,
     selected: (usize, usize),
+    #[serde(default)]
+    selected_target: Option<SelectionTarget>,
 
     #[serde(skip)]
     config: Arc<Config>,
@@ -110,6 +112,7 @@ impl PageComponent {
             render_cache: HashMap::new(),
             viewport: Rect::default(),
             selected: (0, 0),
+            selected_target: None,
 
             is_contents: false,
             is_zen_mode: config.page.default_zen,
@@ -225,6 +228,7 @@ impl PageComponent {
         debug!("flushing '{}' cached renders", self.render_cache.len());
         self.render_cache.clear();
         self.selected = (0, 0);
+        self.selected_target = None;
     }
 
     fn select_header(&mut self, anchor: String) {
@@ -275,15 +279,23 @@ impl PageComponent {
         };
 
         for (y, line) in page.lines.iter().enumerate() {
-            if line
-                .iter()
-                .any(|word| self.selected.0 <= word.index && self.selected.1 >= word.index)
-            {
+            if line.iter().any(|word| self.is_word_selected(word)) {
                 return y;
             }
         }
 
         0
+    }
+
+    fn is_word_selected(&self, word: &Word) -> bool {
+        if matches!(
+            self.selected_target.as_ref(),
+            Some(SelectionTarget::TableCellImage { .. })
+        ) {
+            return word.selection_target.as_ref() == self.selected_target.as_ref();
+        }
+
+        self.selected.0 <= word.index && self.selected.1 >= word.index
     }
 
     fn select_node(&mut self, idx: usize) {
@@ -296,93 +308,91 @@ impl PageComponent {
         let last_index = node.last_child().map(|x| x.index()).unwrap_or(first_index);
 
         self.selected = (first_index, last_index);
+        self.selected_target = Some(SelectionTarget::DocumentNode(first_index));
     }
 
     fn selected_node(&self) -> Option<Node<'_>> {
         self.page.content.nth(self.selected.0)
     }
 
-    fn is_selectable(node: Node<'_>) -> bool {
-        matches!(
-            node.data(),
-            Data::Link(_) | Data::Image(_) | Data::Figure(_)
-        )
+    fn selected_target(&self) -> Option<SelectionTarget> {
+        self.selected_target.clone().or_else(|| {
+            self.selected_node()
+                .map(|node| SelectionTarget::DocumentNode(node.index()))
+        })
+    }
+
+    fn select_target(&mut self, target: SelectionTarget) {
+        match &target {
+            SelectionTarget::DocumentNode(index) => {
+                self.select_node(*index);
+            }
+            SelectionTarget::TableCellImage { table_index, .. } => {
+                self.selected = (*table_index, *table_index);
+                self.selected_target = Some(target);
+            }
+        }
+    }
+
+    fn selected_link_position(&self, page: &RenderedDocument) -> Option<usize> {
+        let selected_target = self.selected_target()?;
+
+        page.links
+            .iter()
+            .position(|(_, target)| target == &selected_target)
     }
 
     fn select_first(&mut self) {
-        if self.page.content.nth(0).is_none() {
-            return;
-        }
+        let target = {
+            let page = rendered_page!(self, self.viewport.width);
+            page.links.first().map(|(_, target)| target.clone())
+        };
 
-        let selectable_node = self
-            .page
-            .content
-            .nth(0)
-            .unwrap()
-            .descendants()
-            .find(|node| Self::is_selectable(*node));
-
-        if let Some(node) = selectable_node {
-            self.select_node(node.index());
+        if let Some(target) = target {
+            self.select_target(target);
             self.check_and_update_scrolling();
         }
     }
 
     fn select_last(&mut self) {
-        if self.page.content.nth(0).is_none() {
-            return;
-        }
+        let target = {
+            let page = rendered_page!(self, self.viewport.width);
+            page.links.last().map(|(_, target)| target.clone())
+        };
 
-        let selectable_node = self
-            .page
-            .content
-            .nth(0)
-            .unwrap()
-            .descendants()
-            .filter(|node| Self::is_selectable(*node) && node.index() > self.selected.1)
-            .last();
-
-        if let Some(node) = selectable_node {
-            self.select_node(node.index());
+        if let Some(target) = target {
+            self.select_target(target);
             self.check_and_update_scrolling();
         }
     }
 
     fn select_next(&mut self) {
-        if self.page.content.nth(0).is_none() {
-            return;
-        }
+        let target = {
+            let page = rendered_page!(self, self.viewport.width);
+            let index = self
+                .selected_link_position(page)
+                .map(|index| index.saturating_add(1))
+                .unwrap_or_default();
+            page.links.get(index).map(|(_, target)| target.clone())
+        };
 
-        let selectable_node = self
-            .page
-            .content
-            .nth(0)
-            .unwrap()
-            .descendants()
-            .find(|node| Self::is_selectable(*node) && self.selected.1 < node.index());
-
-        if let Some(node) = selectable_node {
-            self.select_node(node.index());
+        if let Some(target) = target {
+            self.select_target(target);
             self.check_and_update_scrolling();
         }
     }
 
     fn select_prev(&mut self) {
-        if self.page.content.nth(0).is_none() {
-            return;
-        }
+        let target = {
+            let page = rendered_page!(self, self.viewport.width);
+            self.selected_link_position(page)
+                .and_then(|index| index.checked_sub(1))
+                .and_then(|index| page.links.get(index))
+                .map(|(_, target)| target.clone())
+        };
 
-        let selectable_node = self
-            .page
-            .content
-            .nth(0)
-            .unwrap()
-            .descendants()
-            .filter(|node| Self::is_selectable(*node) && node.index() < self.selected.0)
-            .last();
-
-        if let Some(node) = selectable_node {
-            self.select_node(node.index());
+        if let Some(target) = target {
+            self.select_target(target);
             self.check_and_update_scrolling();
         }
     }
@@ -393,8 +403,8 @@ impl PageComponent {
         let page = rendered_page!(self, self.viewport.width);
 
         let selected_y = self.selected_y() as u16;
-        let selected_node = match self.selected_node() {
-            Some(node) => node,
+        let selected_target = match self.selected_target() {
+            Some(target) => target,
             None => return,
         };
 
@@ -403,27 +413,27 @@ impl PageComponent {
         }
 
         if selected_y < self.viewport.top() {
-            let (_, idx) = page
+            let (_, target) = page
                 .links
                 .iter()
                 .find(|(y, _)| self.viewport.contains((0, *y as u16).into()))
                 .map(|x| x.to_owned())
-                .unwrap_or((selected_y as usize, selected_node.index()));
+                .unwrap_or((selected_y as usize, selected_target.clone()));
 
-            self.select_node(idx);
+            self.select_target(target);
             return;
         }
 
         if selected_y > self.viewport.bottom() {
-            let (_, idx) = page
+            let (_, target) = page
                 .links
                 .iter()
                 .rev()
                 .find(|(y, _)| self.viewport.contains((0, *y as u16).into()))
                 .map(|x| x.to_owned())
-                .unwrap_or((selected_y as usize, selected_node.index()));
+                .unwrap_or((selected_y as usize, selected_target));
 
-            self.select_node(idx)
+            self.select_target(target)
         }
     }
 
@@ -525,8 +535,26 @@ impl PageComponent {
     }
 
     fn open_selected(&self) -> ActionResult {
-        let index = self.selected.0;
-        let node = Node::new(&self.page.content, index).unwrap();
+        let target = match self.selected_target() {
+            Some(target) => target,
+            None => return ActionResult::Ignored,
+        };
+
+        let index = match target {
+            SelectionTarget::DocumentNode(index) => index,
+            SelectionTarget::TableCellImage { image, .. } => {
+                return Action::PopupImage(FigureData {
+                    image: Some(image),
+                    caption: None,
+                })
+                .into()
+            }
+        };
+
+        let node = match Node::new(&self.page.content, index) {
+            Some(node) => node,
+            None => return ActionResult::Ignored,
+        };
         let data = node.data().to_owned();
 
         let link = match data {
@@ -790,12 +818,8 @@ impl Component for PageComponent {
                             word.style,
                         );
 
-                        if let Some(node) = word.node(&self.page.content) {
-                            let index = node.index();
-                            if self.selected.0 <= index && index <= self.selected.1 {
-                                span = span
-                                    .patch_style(Style::new().add_modifier(Modifier::UNDERLINED))
-                            }
+                        if self.is_word_selected(word) {
+                            span = span.patch_style(Style::new().add_modifier(Modifier::UNDERLINED))
                         }
 
                         spans.push(span);
