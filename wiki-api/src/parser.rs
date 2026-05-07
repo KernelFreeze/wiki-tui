@@ -5,7 +5,7 @@ use tracing::{trace, warn};
 use url::Url;
 
 use crate::{
-    document::{Data, HeaderKind, Raw, UnsupportedElement},
+    document::{Data, HeaderKind, Raw, TableCellData, TableData, TableRowData, UnsupportedElement},
     languages::Language,
     page::{
         link_data::{AnchorData, ExternalData, ExternalToInteralData, InternalData, MediaData},
@@ -67,7 +67,10 @@ impl WikipediaParser {
 
                     "table" => {
                         ignore_children = true;
-                        Data::Unsupported(UnsupportedElement::Table)
+                        match Self::parse_table(node) {
+                            Some(table) => Data::Table(table),
+                            None => Data::Unsupported(UnsupportedElement::Table),
+                        }
                     }
                     "image" => {
                         ignore_children = true;
@@ -274,6 +277,115 @@ impl WikipediaParser {
         index
     }
 
+    fn parse_table(node: &Handle) -> Option<TableData> {
+        let mut caption = None;
+        let mut rows = Vec::new();
+
+        for child in node.children.borrow().iter() {
+            match Self::element_name(child).as_deref() {
+                Some("caption") => {
+                    caption = caption.or_else(|| Self::node_text(child));
+                }
+                Some("tr") => {
+                    if let Some(row) = Self::parse_table_row(child) {
+                        rows.push(row);
+                    }
+                }
+                Some("thead" | "tbody" | "tfoot") => {
+                    rows.extend(Self::parse_table_section(child));
+                }
+                _ => {}
+            }
+        }
+
+        if caption.is_none() && rows.is_empty() {
+            return None;
+        }
+
+        Some(TableData { caption, rows })
+    }
+
+    fn parse_table_section(node: &Handle) -> Vec<TableRowData> {
+        node.children
+            .borrow()
+            .iter()
+            .filter_map(|child| {
+                if Self::element_name(child).as_deref() == Some("tr") {
+                    Self::parse_table_row(child)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn parse_table_row(node: &Handle) -> Option<TableRowData> {
+        let cells: Vec<TableCellData> = node
+            .children
+            .borrow()
+            .iter()
+            .filter_map(|child| match Self::element_name(child).as_deref() {
+                Some("th") => Some(TableCellData {
+                    header: true,
+                    text: Self::node_text(child).unwrap_or_default(),
+                }),
+                Some("td") => Some(TableCellData {
+                    header: false,
+                    text: Self::node_text(child).unwrap_or_default(),
+                }),
+                _ => None,
+            })
+            .collect();
+
+        if cells.is_empty() || cells.iter().all(|cell| cell.text.is_empty()) {
+            return None;
+        }
+
+        Some(TableRowData { cells })
+    }
+
+    fn element_name(node: &Handle) -> Option<String> {
+        let NodeData::Element { ref name, .. } = node.data else {
+            return None;
+        };
+
+        Some(name.local.to_string())
+    }
+
+    fn node_text(node: &Handle) -> Option<String> {
+        let mut text = String::new();
+        Self::collect_node_text(node, &mut text);
+        Self::normalize_text(&text)
+    }
+
+    fn collect_node_text(node: &Handle, text: &mut String) {
+        match node.data {
+            NodeData::Text { ref contents } => {
+                text.push_str(&contents.borrow());
+                text.push(' ');
+            }
+            NodeData::Element { ref name, .. } => match name.local.as_ref() {
+                "br" => text.push(' '),
+                "style" | "script" | "table" => {}
+                _ => {
+                    for child in node.children.borrow().iter() {
+                        Self::collect_node_text(child, text);
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn normalize_text(value: &str) -> Option<String> {
+        let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        }
+    }
+
     fn parse_section<'a>(
         &mut self,
         mut attrs: impl Iterator<Item = &'a (String, String)>,
@@ -399,6 +511,112 @@ impl WikipediaParser {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Parser, WikipediaParser};
+    use crate::{document::Data, languages::Language, Endpoint};
+
+    fn parse_nodes(html: &str) -> Vec<crate::document::Raw> {
+        WikipediaParser::parse_document(
+            html,
+            Endpoint::parse("https://en.wikipedia.org/w/api.php").unwrap(),
+            Language::default(),
+        )
+        .nodes()
+    }
+
+    #[test]
+    fn parses_table_caption_header_and_body_rows() {
+        let nodes = parse_nodes(
+            r#"
+            <section>
+                <table class="wikitable">
+                    <caption>Planets</caption>
+                    <tr><th>Name</th><th>Moons</th></tr>
+                    <tr><td>Earth</td><td>1</td></tr>
+                </table>
+            </section>
+            "#,
+        );
+
+        let table = nodes
+            .iter()
+            .find_map(|node| match &node.data {
+                Data::Table(table) => Some(table),
+                _ => None,
+            })
+            .expect("table node");
+
+        assert_eq!(table.caption.as_deref(), Some("Planets"));
+        assert_eq!(table.rows.len(), 2);
+        assert!(table.rows[0].cells.iter().all(|cell| cell.header));
+        assert_eq!(table.rows[0].cells[0].text, "Name");
+        assert_eq!(table.rows[1].cells[0].text, "Earth");
+    }
+
+    #[test]
+    fn parses_table_sections() {
+        let nodes = parse_nodes(
+            r#"
+            <table>
+                <thead><tr><th>Year</th><th>Event</th></tr></thead>
+                <tbody><tr><td>1969</td><td>Moon landing</td></tr></tbody>
+            </table>
+            "#,
+        );
+
+        let table = nodes
+            .iter()
+            .find_map(|node| match &node.data {
+                Data::Table(table) => Some(table),
+                _ => None,
+            })
+            .expect("table node");
+
+        assert_eq!(table.rows.len(), 2);
+        assert_eq!(table.rows[1].cells[1].text, "Moon landing");
+    }
+
+    #[test]
+    fn flattens_nested_inline_content_inside_cells() {
+        let nodes = parse_nodes(
+            r#"
+            <table>
+                <tr>
+                    <td><a href="/wiki/Earth" rel="mw:WikiLink" title="Earth">Earth</a><br><b>planet</b></td>
+                </tr>
+            </table>
+            "#,
+        );
+
+        let table = nodes
+            .iter()
+            .find_map(|node| match &node.data {
+                Data::Table(table) => Some(table),
+                _ => None,
+            })
+            .expect("table node");
+
+        assert_eq!(table.rows[0].cells[0].text, "Earth planet");
+    }
+
+    #[test]
+    fn skips_empty_table_rows() {
+        let nodes = parse_nodes("<table><tr><td> </td></tr><tr><td>Value</td></tr></table>");
+
+        let table = nodes
+            .iter()
+            .find_map(|node| match &node.data {
+                Data::Table(table) => Some(table),
+                _ => None,
+            })
+            .expect("table node");
+
+        assert_eq!(table.rows.len(), 1);
+        assert_eq!(table.rows[0].cells[0].text, "Value");
     }
 }
 

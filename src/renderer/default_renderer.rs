@@ -2,7 +2,7 @@ use ratatui::style::{Color, Modifier, Style};
 use textwrap::wrap_algorithms::{wrap_optimal_fit, Penalties};
 use tracing::warn;
 use wiki_api::{
-    document::{Data, Document, HeaderKind, Node, UnsupportedElement},
+    document::{Data, Document, HeaderKind, Node, TableData, TableRowData, UnsupportedElement},
     page::Link,
 };
 
@@ -529,6 +529,142 @@ impl<'a> Renderer {
         self.add_whitespace();
     }
 
+    fn render_table(&mut self, node: Node<'a>, table: &TableData) {
+        self.ensure_empty_line();
+
+        if let Some(caption) = table.caption.as_deref() {
+            self.add_modifier(Modifier::ITALIC);
+            self.set_text_fg(Color::Gray);
+            self.render_string(&format!("[Table] {caption}"), node.index());
+            self.clear_line();
+            self.reset_text_fg();
+            self.remove_modifier(Modifier::ITALIC);
+        }
+
+        let widths = Self::table_column_widths(table, self.width as usize);
+        if widths.is_empty() {
+            self.add_empty_line();
+            return;
+        }
+
+        let separator = Self::format_table_separator(&widths);
+        for row in table.rows.iter() {
+            let row_style = if Self::is_header_row(row) {
+                self.text_style.add_modifier(Modifier::BOLD)
+            } else {
+                self.text_style
+            };
+
+            self.push_rendered_line(
+                Self::format_table_row(row, &widths),
+                node.index(),
+                row_style,
+            );
+
+            if Self::is_header_row(row) {
+                self.push_rendered_line(separator.clone(), node.index(), self.text_style);
+            }
+        }
+
+        self.add_empty_line();
+    }
+
+    fn table_column_widths(table: &TableData, available_width: usize) -> Vec<usize> {
+        let column_count = table
+            .rows
+            .iter()
+            .map(|row| row.cells.len())
+            .max()
+            .unwrap_or_default();
+
+        if column_count == 0 {
+            return Vec::new();
+        }
+
+        let max_cell_width = Self::max_table_cell_width(available_width, column_count);
+        let mut widths = vec![1; column_count];
+
+        for row in table.rows.iter() {
+            for (index, cell) in row.cells.iter().enumerate() {
+                let cell_width = cell.text.chars().count().max(1).min(max_cell_width);
+                widths[index] = widths[index].max(cell_width);
+            }
+        }
+
+        widths
+    }
+
+    fn max_table_cell_width(available_width: usize, column_count: usize) -> usize {
+        let separator_width = column_count.saturating_mul(3).saturating_add(1);
+
+        available_width
+            .saturating_sub(separator_width)
+            .checked_div(column_count)
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    fn is_header_row(row: &TableRowData) -> bool {
+        row.cells.iter().any(|cell| cell.header)
+    }
+
+    fn format_table_row(row: &TableRowData, widths: &[usize]) -> String {
+        let mut line = String::from("|");
+
+        for (index, width) in widths.iter().enumerate() {
+            let text = row
+                .cells
+                .get(index)
+                .map(|cell| cell.text.as_str())
+                .unwrap_or("");
+            line.push(' ');
+            line.push_str(&Self::fit_table_cell(text, *width));
+            line.push(' ');
+            line.push('|');
+        }
+
+        line
+    }
+
+    fn format_table_separator(widths: &[usize]) -> String {
+        let mut line = String::from("|");
+
+        for width in widths {
+            line.push(' ');
+            line.push_str(&"-".repeat(*width));
+            line.push(' ');
+            line.push('|');
+        }
+
+        line
+    }
+
+    fn fit_table_cell(text: &str, width: usize) -> String {
+        let mut value: String = text.chars().take(width).collect();
+        let value_width = value.chars().count();
+
+        if value_width < width {
+            value.push_str(&" ".repeat(width - value_width));
+        }
+
+        value
+    }
+
+    fn push_rendered_line(&mut self, line: String, index: usize, style: Style) {
+        let content = format!("{}{}", " ".repeat(self.left_padding as usize), line);
+        let width = content.chars().count() as f64;
+
+        self.current_line.push(Word {
+            index,
+            content,
+            style,
+            width,
+            whitespace_width: 0.0,
+            penalty_width: 0.0,
+        });
+        self.clear_line();
+    }
+
     fn render_unsupported_element(
         &mut self,
         inline: bool,
@@ -591,6 +727,7 @@ impl<'a> Renderer {
             Data::Italic => self.render_italic(node),
             Data::Linebreak => self.render_linebreak(node),
             Data::Link(link) => self.render_link(node, link.clone()),
+            Data::Table(table) => self.render_table(node, table),
             Data::Unknown => self.render_children(node),
             Data::Unsupported(element) => {
                 self.render_unsupported_element(false, element, node.index())
@@ -604,4 +741,113 @@ impl<'a> Renderer {
 
 pub fn render_document(document: &Document, width: u16) -> RenderedDocument {
     Renderer::render_document(document, width)
+}
+
+#[cfg(test)]
+mod tests {
+    use wiki_api::document::{Data, Document, Raw, TableCellData, TableData, TableRowData};
+
+    use super::render_document;
+
+    fn document_with(data: Data) -> Document {
+        Document {
+            nodes: vec![Raw {
+                index: 0,
+                parent: None,
+                prev: None,
+                next: None,
+                first_child: None,
+                last_child: None,
+                data,
+            }],
+        }
+    }
+
+    fn cell(header: bool, text: &str) -> TableCellData {
+        TableCellData {
+            header,
+            text: text.to_string(),
+        }
+    }
+
+    fn row(cells: Vec<TableCellData>) -> TableRowData {
+        TableRowData { cells }
+    }
+
+    fn table() -> TableData {
+        TableData {
+            caption: Some("Planets".to_string()),
+            rows: vec![
+                row(vec![cell(true, "Name"), cell(true, "Moons")]),
+                row(vec![cell(false, "Earth"), cell(false, "1")]),
+            ],
+        }
+    }
+
+    fn rendered_lines(document: &Document, width: u16) -> Vec<String> {
+        render_document(document, width)
+            .lines
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|word| {
+                        format!(
+                            "{}{}",
+                            word.content,
+                            " ".repeat(word.whitespace_width as usize)
+                        )
+                    })
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn renders_table_instead_of_unsupported_element() {
+        let document = document_with(Data::Table(table()));
+        let text = rendered_lines(&document, 120).join("\n");
+
+        assert!(text.contains("[Table] Planets"));
+        assert!(text.contains("| Name"));
+        assert!(text.contains("| Earth"));
+        assert!(!text.contains("Unsupported Element"));
+    }
+
+    #[test]
+    fn renders_header_separator() {
+        let document = document_with(Data::Table(table()));
+        let text = rendered_lines(&document, 120).join("\n");
+
+        assert!(text.contains("| ----- | ----- |"));
+    }
+
+    #[test]
+    fn renders_missing_cells_as_empty_columns() {
+        let document = document_with(Data::Table(TableData {
+            caption: None,
+            rows: vec![
+                row(vec![cell(true, "Name"), cell(true, "Moons")]),
+                row(vec![cell(false, "Mars")]),
+            ],
+        }));
+        let text = rendered_lines(&document, 120).join("\n");
+
+        assert!(text.contains("| Mars |       |"));
+    }
+
+    #[test]
+    fn renders_narrow_table_without_panicking() {
+        let document = document_with(Data::Table(TableData {
+            caption: Some("Very narrow".to_string()),
+            rows: vec![row(vec![
+                cell(true, "Long header"),
+                cell(true, "Another long header"),
+                cell(true, "Third long header"),
+            ])],
+        }));
+        let lines = rendered_lines(&document, 8);
+
+        assert!(lines.iter().any(|line| line.contains("[Table]")));
+        assert!(lines.iter().any(|line| line.starts_with("| ")));
+    }
 }

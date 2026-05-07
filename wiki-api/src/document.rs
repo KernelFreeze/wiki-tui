@@ -65,6 +65,7 @@ pub enum Data {
     Linebreak,
 
     Link(Link),
+    Table(TableData),
     #[default]
     Unknown,
 
@@ -79,6 +80,23 @@ pub enum UnsupportedElement {
     Figure,
     MathElement,
     PreformattedText,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TableData {
+    pub caption: Option<String>,
+    pub rows: Vec<TableRowData>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TableRowData {
+    pub cells: Vec<TableCellData>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TableCellData {
+    pub header: bool,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
