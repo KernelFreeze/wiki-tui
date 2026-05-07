@@ -68,6 +68,7 @@ pub enum Data {
     Link(Link),
     Image(ImageData),
     Figure(FigureData),
+    Table(TableData),
     #[default]
     Unknown,
 
@@ -95,6 +96,23 @@ pub struct ImageData {
 pub struct FigureData {
     pub image: Option<ImageData>,
     pub caption: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TableData {
+    pub caption: Option<String>,
+    pub rows: Vec<TableRowData>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TableRowData {
+    pub cells: Vec<TableCellData>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TableCellData {
+    pub header: bool,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
