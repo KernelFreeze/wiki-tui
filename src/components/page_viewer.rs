@@ -18,6 +18,7 @@ use crate::{
 use super::{page::PageComponent, page_language_popup::PageLanguageSelectionComponent, Component};
 
 use wiki_api::{
+    document::{Data, UnsupportedElement},
     languages::Language,
     page::{Page, Property},
 };
@@ -67,9 +68,18 @@ impl PageViewer {
         };
 
         let reader = std::io::BufReader::new(file);
-        match serde_json::from_reader(reader) {
-            Ok(cache) => {
+        match serde_json::from_reader::<_, HashMap<Uuid, PageComponent>>(reader) {
+            Ok(mut cache) => {
                 debug!("successfully loaded cache from {:?}", path);
+                let stale_entries = cache.len();
+                cache.retain(|_, page_component| !Self::contains_stale_table_node(page_component));
+                let stale_entries = stale_entries.saturating_sub(cache.len());
+                if stale_entries > 0 {
+                    debug!(
+                        "dropped {} stale cached pages with unsupported tables",
+                        stale_entries
+                    );
+                }
                 self.page_cache = cache;
                 self.rebuild_identifier_index();
             }
@@ -77,6 +87,16 @@ impl PageViewer {
                 error!("failed to deserialize cache from {:?}: {}", path, e);
             }
         };
+    }
+
+    fn contains_stale_table_node(page_component: &PageComponent) -> bool {
+        page_component.page.content.nodes.iter().any(|node| {
+            matches!(
+                &node.data,
+                Data::Unsupported(UnsupportedElement::Table)
+                    | Data::UnsupportedInline(UnsupportedElement::Table)
+            )
+        })
     }
 
     fn rebuild_identifier_index(&mut self) {

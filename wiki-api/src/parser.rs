@@ -70,10 +70,7 @@ impl WikipediaParser {
 
                     "table" => {
                         ignore_children = true;
-                        match Self::parse_table(node) {
-                            Some(table) => Data::Table(table),
-                            None => Data::Unsupported(UnsupportedElement::Table),
-                        }
+                        Data::Table(Self::parse_table(node))
                     }
                     "img" | "image" => {
                         ignore_children = true;
@@ -391,14 +388,28 @@ impl WikipediaParser {
         self.endpoint.join(&value).ok()
     }
 
-    fn parse_table(node: &Handle) -> Option<TableData> {
+    fn parse_table(node: &Handle) -> TableData {
         let mut caption = None;
         let mut rows = Vec::new();
 
+        Self::collect_table_parts(node, true, &mut caption, &mut rows);
+
+        TableData { caption, rows }
+    }
+
+    fn collect_table_parts(
+        node: &Handle,
+        is_root: bool,
+        caption: &mut Option<String>,
+        rows: &mut Vec<TableRowData>,
+    ) {
         for child in node.children.borrow().iter() {
             match Self::element_name(child).as_deref() {
+                Some("table") if !is_root => {}
                 Some("caption") => {
-                    caption = caption.or_else(|| Self::node_text(child));
+                    if caption.is_none() {
+                        *caption = Self::node_text(child);
+                    }
                 }
                 Some("tr") => {
                     if let Some(row) = Self::parse_table_row(child) {
@@ -406,31 +417,13 @@ impl WikipediaParser {
                     }
                 }
                 Some("thead" | "tbody" | "tfoot") => {
-                    rows.extend(Self::parse_table_section(child));
+                    Self::collect_table_parts(child, false, caption, rows);
                 }
-                _ => {}
+                _ => {
+                    Self::collect_table_parts(child, false, caption, rows);
+                }
             }
         }
-
-        if caption.is_none() && rows.is_empty() {
-            return None;
-        }
-
-        Some(TableData { caption, rows })
-    }
-
-    fn parse_table_section(node: &Handle) -> Vec<TableRowData> {
-        node.children
-            .borrow()
-            .iter()
-            .filter_map(|child| {
-                if Self::element_name(child).as_deref() == Some("tr") {
-                    Self::parse_table_row(child)
-                } else {
-                    None
-                }
-            })
-            .collect()
     }
 
     fn parse_table_row(node: &Handle) -> Option<TableRowData> {
@@ -631,7 +624,11 @@ impl WikipediaParser {
 #[cfg(test)]
 mod tests {
     use super::{Parser, WikipediaParser};
-    use crate::{document::Data, languages::Language, Endpoint};
+    use crate::{
+        document::{Data, UnsupportedElement},
+        languages::Language,
+        Endpoint,
+    };
 
     fn parse_nodes(html: &str) -> Vec<crate::document::Raw> {
         WikipediaParser::parse_document(
@@ -767,6 +764,42 @@ mod tests {
 
         assert_eq!(table.rows.len(), 2);
         assert_eq!(table.rows[1].cells[1].text, "Moon landing");
+    }
+
+    #[test]
+    fn parses_table_rows_inside_wrapper_elements() {
+        let nodes = parse_nodes(
+            r#"
+            <table>
+                <tbody>
+                    <tr><td>Wrapped row</td></tr>
+                </tbody>
+            </table>
+            "#,
+        );
+
+        let table = nodes
+            .iter()
+            .find_map(|node| match &node.data {
+                Data::Table(table) => Some(table),
+                _ => None,
+            })
+            .expect("table node");
+
+        assert_eq!(table.rows.len(), 1);
+        assert_eq!(table.rows[0].cells[0].text, "Wrapped row");
+    }
+
+    #[test]
+    fn keeps_empty_tables_as_table_nodes() {
+        let nodes = parse_nodes("<table><tbody><tr><td> </td></tr></tbody></table>");
+
+        assert!(nodes
+            .iter()
+            .any(|node| matches!(&node.data, Data::Table(_))));
+        assert!(!nodes
+            .iter()
+            .any(|node| matches!(&node.data, Data::Unsupported(UnsupportedElement::Table))));
     }
 
     #[test]

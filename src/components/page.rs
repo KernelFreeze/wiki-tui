@@ -81,6 +81,7 @@ macro_rules! rendered_page {
 pub struct PageComponent {
     pub page: Page,
     renderer: Renderer,
+    #[serde(skip)]
     render_cache: HashMap<u16, RenderedDocument>,
     viewport: Rect,
     selected: (usize, usize),
@@ -126,6 +127,7 @@ impl PageComponent {
     pub fn rebuild(&mut self, config: Arc<Config>, theme: Arc<Theme>) {
         self.config = config;
         self.theme = theme;
+        self.render_cache.clear();
         self.contents_state = PageContentsState {
             list_state: ListState::default().with_selected(Some(0)),
             max_idx_section: self
