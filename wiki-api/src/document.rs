@@ -69,6 +69,7 @@ pub enum Data {
     Image(ImageData),
     Figure(FigureData),
     Table(TableData),
+    PreformattedText(PreformattedTextData),
     #[default]
     Unknown,
 
@@ -115,6 +116,12 @@ pub struct TableCellData {
     pub text: String,
     #[serde(default)]
     pub images: Vec<ImageData>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PreformattedTextData {
+    pub text: String,
+    pub language: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

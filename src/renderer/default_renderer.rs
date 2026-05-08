@@ -1,10 +1,17 @@
+use std::sync::OnceLock;
+
 use ratatui::style::{Color, Modifier, Style};
+use syntect::{
+    easy::HighlightLines,
+    highlighting::{Style as SyntectStyle, Theme, ThemeSet},
+    parsing::{SyntaxReference, SyntaxSet},
+};
 use textwrap::wrap_algorithms::{wrap_optimal_fit, Penalties};
 use tracing::warn;
 use wiki_api::{
     document::{
-        Data, Document, FigureData, HeaderKind, ImageData, Node, TableCellData, TableData,
-        TableRowData, UnsupportedElement,
+        Data, Document, FigureData, HeaderKind, ImageData, Node, PreformattedTextData,
+        TableCellData, TableData, TableRowData, UnsupportedElement,
     },
     page::Link,
 };
@@ -21,10 +28,20 @@ const BLOCKQUOTE_PADDING: u8 = 4;
 const LIST_PADDING: u8 = 1;
 const LIST_PREFIX: char = '-';
 
+const PREFORMATTED_PADDING: usize = 2;
+const PREFORMATTED_CONTINUATION_PADDING: usize = 2;
+const PREFORMATTED_TAB_WIDTH: usize = 4;
+
 #[derive(Clone)]
 struct TableCellSegment {
     content: String,
     selection_target: Option<SelectionTarget>,
+}
+
+#[derive(Clone)]
+struct StyledTextSegment {
+    content: String,
+    style: Style,
 }
 
 struct Renderer {
@@ -886,6 +903,213 @@ impl<'a> Renderer {
         }
     }
 
+    fn render_preformatted_text(&mut self, node: Node<'a>, preformatted: &PreformattedTextData) {
+        self.ensure_empty_line();
+
+        let syntax = Self::find_preformatted_syntax(preformatted.language.as_deref());
+        let mut highlighter =
+            syntax.map(|syntax| HighlightLines::new(syntax, Self::highlight_theme()));
+
+        for line in preformatted.text.split('\n') {
+            let line = Self::expand_tabs(line.trim_end_matches('\r'));
+            let segments = match highlighter.as_mut() {
+                Some(highlighter) => highlighter
+                    .highlight_line(&line, Self::syntax_set())
+                    .ok()
+                    .map(Self::highlighted_segments)
+                    .unwrap_or_else(|| Self::plain_preformatted_segments(&line)),
+                None => Self::plain_preformatted_segments(&line),
+            };
+
+            self.render_preformatted_line(node.index(), segments);
+        }
+
+        self.add_empty_line();
+    }
+
+    fn syntax_set() -> &'static SyntaxSet {
+        static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+        SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+    }
+
+    fn highlight_theme() -> &'static Theme {
+        static THEME: OnceLock<Theme> = OnceLock::new();
+        THEME.get_or_init(|| {
+            let mut themes = ThemeSet::load_defaults().themes;
+            themes
+                .remove("base16-ocean.dark")
+                .or_else(|| themes.remove("Solarized (dark)"))
+                .or_else(|| themes.into_values().next())
+                .expect("syntect default themes should be available")
+        })
+    }
+
+    fn find_preformatted_syntax(language: Option<&str>) -> Option<&'static SyntaxReference> {
+        let language = language?;
+        let language = language.trim().trim_start_matches('.').to_ascii_lowercase();
+        if language.is_empty() {
+            return None;
+        }
+
+        let syntax_set = Self::syntax_set();
+        for candidate in Self::language_candidates(&language) {
+            if let Some(syntax) = syntax_set
+                .find_syntax_by_token(&candidate)
+                .or_else(|| syntax_set.find_syntax_by_extension(&candidate))
+            {
+                return Some(syntax);
+            }
+        }
+
+        syntax_set.syntaxes().iter().find(|syntax| {
+            syntax.name.eq_ignore_ascii_case(&language)
+                || syntax
+                    .file_extensions
+                    .iter()
+                    .any(|extension| extension.eq_ignore_ascii_case(&language))
+        })
+    }
+
+    fn language_candidates(language: &str) -> Vec<String> {
+        match language {
+            "bash" | "shell" | "sh" => vec!["bash", "sh", "shell"],
+            "c++" | "cpp" | "cxx" => vec!["cpp", "c++", "cxx"],
+            "c#" | "csharp" | "cs" => vec!["cs", "c#", "csharp"],
+            "javascript" | "js" | "node" => vec!["js", "javascript", "node"],
+            "typescript" | "ts" => vec!["ts", "typescript"],
+            "golang" | "go" => vec!["go", "golang"],
+            "html" | "xhtml" => vec!["html", "xhtml"],
+            "markdown" | "md" => vec!["md", "markdown"],
+            "python" | "py" => vec!["py", "python"],
+            "rust" | "rs" => vec!["rs", "rust"],
+            "yaml" | "yml" => vec!["yml", "yaml"],
+            "xml" | "svg" => vec!["xml", "svg"],
+            _ => vec![language],
+        }
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
+    }
+
+    fn highlighted_segments(highlighted: Vec<(SyntectStyle, &str)>) -> Vec<StyledTextSegment> {
+        highlighted
+            .into_iter()
+            .filter(|(_, content)| !content.is_empty())
+            .map(|(style, content)| StyledTextSegment {
+                content: content.to_string(),
+                style: Self::syntect_style(style),
+            })
+            .collect()
+    }
+
+    fn plain_preformatted_segments(line: &str) -> Vec<StyledTextSegment> {
+        if line.is_empty() {
+            Vec::new()
+        } else {
+            vec![StyledTextSegment {
+                content: line.to_string(),
+                style: Style::default().fg(Color::Gray),
+            }]
+        }
+    }
+
+    fn syntect_style(style: SyntectStyle) -> Style {
+        let foreground = style.foreground;
+        Style::default().fg(Color::Rgb(foreground.r, foreground.g, foreground.b))
+    }
+
+    fn expand_tabs(line: &str) -> String {
+        let mut expanded = String::new();
+        let mut column = 0;
+
+        for ch in line.chars() {
+            if ch == '\t' {
+                let spaces = PREFORMATTED_TAB_WIDTH - (column % PREFORMATTED_TAB_WIDTH);
+                expanded.push_str(&" ".repeat(spaces));
+                column += spaces;
+            } else {
+                expanded.push(ch);
+                column += 1;
+            }
+        }
+
+        expanded
+    }
+
+    fn render_preformatted_line(&mut self, index: usize, segments: Vec<StyledTextSegment>) {
+        let base_padding = self.left_padding as usize + PREFORMATTED_PADDING;
+        let continuation_padding = base_padding + PREFORMATTED_CONTINUATION_PADDING;
+        let mut padding = base_padding;
+        let mut remaining = Self::preformatted_content_width(self.width, padding);
+        let mut words = Self::preformatted_padding_words(index, padding);
+
+        if segments.is_empty() {
+            self.rendered_lines.push(words);
+            return;
+        }
+
+        for segment in segments {
+            for ch in segment.content.chars() {
+                if remaining == 0 {
+                    self.rendered_lines.push(words);
+                    padding = continuation_padding;
+                    remaining = Self::preformatted_content_width(self.width, padding);
+                    words = Self::preformatted_padding_words(index, padding);
+                }
+
+                Self::append_preformatted_char(&mut words, index, ch, segment.style);
+                remaining = remaining.saturating_sub(1);
+            }
+        }
+
+        self.rendered_lines.push(words);
+    }
+
+    fn preformatted_content_width(width: u16, padding: usize) -> usize {
+        (width as usize).saturating_sub(padding).max(1)
+    }
+
+    fn preformatted_padding_words(index: usize, padding: usize) -> Vec<Word> {
+        if padding == 0 {
+            return Vec::new();
+        }
+
+        vec![Word {
+            index,
+            content: " ".repeat(padding),
+            style: Style::default(),
+            selection_target: None,
+            width: padding as f64,
+            whitespace_width: 0.0,
+            penalty_width: 0.0,
+        }]
+    }
+
+    fn append_preformatted_char(words: &mut Vec<Word>, index: usize, ch: char, style: Style) {
+        if let Some(word) = words.last_mut() {
+            if word.index == index
+                && word.style == style
+                && word.selection_target.is_none()
+                && word.whitespace_width == 0.0
+                && word.penalty_width == 0.0
+            {
+                word.content.push(ch);
+                word.width += 1.0;
+                return;
+            }
+        }
+
+        words.push(Word {
+            index,
+            content: ch.to_string(),
+            style,
+            selection_target: None,
+            width: 1.0,
+            whitespace_width: 0.0,
+            penalty_width: 0.0,
+        });
+    }
+
     fn render_unsupported_element(
         &mut self,
         inline: bool,
@@ -951,6 +1175,9 @@ impl<'a> Renderer {
             Data::Image(image) => self.render_image(node, image),
             Data::Figure(figure) => self.render_figure(node, figure),
             Data::Table(table) => self.render_table(node, table),
+            Data::PreformattedText(preformatted) => {
+                self.render_preformatted_text(node, preformatted)
+            }
             Data::Unknown => self.render_children(node),
             Data::Unsupported(element) => {
                 self.render_unsupported_element(false, element, node.index())
@@ -968,9 +1195,12 @@ pub fn render_document(document: &Document, width: u16) -> RenderedDocument {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Color;
+
     use crate::renderer::SelectionTarget;
     use wiki_api::document::{
-        Data, Document, FigureData, ImageData, Raw, TableCellData, TableData, TableRowData,
+        Data, Document, FigureData, ImageData, PreformattedTextData, Raw, TableCellData, TableData,
+        TableRowData,
     };
     use wiki_api::Endpoint;
 
@@ -1017,6 +1247,13 @@ mod tests {
                 row(vec![cell(true, "Name"), cell(true, "Moons")]),
                 row(vec![cell(false, "Earth"), cell(false, "1")]),
             ],
+        }
+    }
+
+    fn preformatted(text: &str, language: Option<&str>) -> PreformattedTextData {
+        PreformattedTextData {
+            text: text.to_string(),
+            language: language.map(ToOwned::to_owned),
         }
     }
 
@@ -1169,5 +1406,42 @@ mod tests {
 
         assert!(lines.iter().any(|line| line.contains("[Table]")));
         assert!(lines.iter().any(|line| line.starts_with("| ")));
+    }
+
+    #[test]
+    fn renders_preformatted_text_instead_of_unsupported_element() {
+        let document = document_with(Data::PreformattedText(preformatted(
+            "fn main() {\n    println!(\"hi\");\n\n}",
+            None,
+        )));
+        let lines = rendered_lines(&document, 120);
+        let text = lines.join("\n");
+
+        assert!(text.contains("fn main()"));
+        assert!(text.contains("      println!"));
+        assert!(lines.iter().any(|line| line == "  "));
+        assert!(!text.contains("Unsupported Element"));
+    }
+
+    #[test]
+    fn soft_wraps_preformatted_text_with_continuation_padding() {
+        let document = document_with(Data::PreformattedText(preformatted("abcdefghi", None)));
+        let lines = rendered_lines(&document, 8);
+
+        assert!(lines.iter().any(|line| line == "  abcdef"));
+        assert!(lines.iter().any(|line| line == "    ghi"));
+    }
+
+    #[test]
+    fn highlights_known_preformatted_languages() {
+        let document = document_with(Data::PreformattedText(preformatted(
+            "fn main() {\n    println!(\"hi\");\n}",
+            Some("rust"),
+        )));
+        let rendered = render_document(&document, 120);
+
+        assert!(rendered.lines.iter().flatten().any(|word| {
+            matches!(word.style.fg, Some(Color::Rgb(_, _, _))) && !word.content.trim().is_empty()
+        }));
     }
 }

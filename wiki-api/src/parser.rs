@@ -6,8 +6,8 @@ use url::Url;
 
 use crate::{
     document::{
-        Data, FigureData, HeaderKind, ImageData, Raw, TableCellData, TableData, TableRowData,
-        UnsupportedElement,
+        Data, FigureData, HeaderKind, ImageData, PreformattedTextData, Raw, TableCellData,
+        TableData, TableRowData, UnsupportedElement,
     },
     languages::Language,
     page::{
@@ -88,7 +88,7 @@ impl WikipediaParser {
                     }
                     "pre" => {
                         ignore_children = true;
-                        Data::Unsupported(UnsupportedElement::PreformattedText)
+                        Data::PreformattedText(self.parse_preformatted_text(node, &attrs))
                     }
 
                     "span"
@@ -306,6 +306,68 @@ impl WikipediaParser {
         Some(FigureData { image, caption })
     }
 
+    fn parse_preformatted_text(
+        &self,
+        node: &Handle,
+        attrs: &[(String, String)],
+    ) -> PreformattedTextData {
+        PreformattedTextData {
+            text: Self::preformatted_node_text(node),
+            language: Self::detect_preformatted_language(attrs)
+                .or_else(|| Self::find_nested_code_language(node)),
+        }
+    }
+
+    fn detect_preformatted_language(attrs: &[(String, String)]) -> Option<String> {
+        Self::attr(attrs, "class")
+            .and_then(|class| {
+                class
+                    .split_whitespace()
+                    .find_map(Self::language_from_class_token)
+            })
+            .or_else(|| Self::attr(attrs, "data-lang").and_then(Self::normalize_language_name))
+            .or_else(|| Self::attr(attrs, "lang").and_then(Self::normalize_language_name))
+    }
+
+    fn find_nested_code_language(node: &Handle) -> Option<String> {
+        if let Some(attrs) = Self::element_attrs(node, &["code"]) {
+            if let Some(language) = Self::detect_preformatted_language(&attrs) {
+                return Some(language);
+            }
+        }
+
+        for child in node.children.borrow().iter() {
+            if let Some(language) = Self::find_nested_code_language(child) {
+                return Some(language);
+            }
+        }
+
+        None
+    }
+
+    fn language_from_class_token(token: &str) -> Option<String> {
+        const PREFIXES: [&str; 4] = [
+            "language-",
+            "lang-",
+            "mw-highlight-lang-",
+            "highlight-source-",
+        ];
+
+        PREFIXES
+            .iter()
+            .find_map(|prefix| token.strip_prefix(prefix))
+            .and_then(Self::normalize_language_name)
+    }
+
+    fn normalize_language_name(value: &str) -> Option<String> {
+        let value = value.trim().trim_start_matches('.').to_ascii_lowercase();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    }
+
     fn find_first_image(&self, node: &Handle) -> Option<ImageData> {
         if let Some(attrs) = Self::element_attrs(node, &["img", "image"]) {
             if let Some(image) = self.parse_image(&attrs) {
@@ -492,6 +554,28 @@ impl WikipediaParser {
         let mut text = String::new();
         Self::collect_node_text(node, &mut text);
         Self::normalize_text(&text)
+    }
+
+    fn preformatted_node_text(node: &Handle) -> String {
+        let mut text = String::new();
+        Self::collect_preformatted_node_text(node, &mut text);
+        text
+    }
+
+    fn collect_preformatted_node_text(node: &Handle, text: &mut String) {
+        match node.data {
+            NodeData::Text { ref contents } => text.push_str(&contents.borrow()),
+            NodeData::Element { ref name, .. } => match name.local.as_ref() {
+                "br" => text.push('\n'),
+                "style" | "script" => {}
+                _ => {
+                    for child in node.children.borrow().iter() {
+                        Self::collect_preformatted_node_text(child, text);
+                    }
+                }
+            },
+            _ => {}
+        }
     }
 
     fn collect_node_text(node: &Handle, text: &mut String) {
@@ -883,6 +967,50 @@ mod tests {
         assert!(!nodes
             .iter()
             .any(|node| matches!(&node.data, Data::Unsupported(UnsupportedElement::Table))));
+    }
+
+    #[test]
+    fn parses_preformatted_text_without_collapsing_whitespace() {
+        let nodes = parse_nodes("<section><pre>line 1\n    line 2\n\n\tline 3</pre></section>");
+
+        let preformatted = nodes
+            .iter()
+            .find_map(|node| match &node.data {
+                Data::PreformattedText(preformatted) => Some(preformatted),
+                _ => None,
+            })
+            .expect("preformatted text node");
+
+        assert_eq!(preformatted.text, "line 1\n    line 2\n\n\tline 3");
+        assert_eq!(preformatted.language, None);
+    }
+
+    #[test]
+    fn detects_preformatted_language_from_common_classes() {
+        let cases = [
+            (
+                r#"<pre class="mw-highlight-lang-python">print("hi")</pre>"#,
+                "python",
+            ),
+            (r#"<pre class="language-rust">fn main() {}</pre>"#, "rust"),
+            (
+                r#"<pre><code class="lang-js">console.log("hi")</code></pre>"#,
+                "js",
+            ),
+        ];
+
+        for (html, expected_language) in cases {
+            let nodes = parse_nodes(html);
+            let preformatted = nodes
+                .iter()
+                .find_map(|node| match &node.data {
+                    Data::PreformattedText(preformatted) => Some(preformatted),
+                    _ => None,
+                })
+                .expect("preformatted text node");
+
+            assert_eq!(preformatted.language.as_deref(), Some(expected_language));
+        }
     }
 
     #[test]

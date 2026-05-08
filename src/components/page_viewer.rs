@@ -72,11 +72,13 @@ impl PageViewer {
             Ok(mut cache) => {
                 debug!("successfully loaded cache from {:?}", path);
                 let stale_entries = cache.len();
-                cache.retain(|_, page_component| !Self::contains_stale_table_node(page_component));
+                cache.retain(|_, page_component| {
+                    !Self::contains_stale_unsupported_node(page_component)
+                });
                 let stale_entries = stale_entries.saturating_sub(cache.len());
                 if stale_entries > 0 {
                     debug!(
-                        "dropped {} stale cached pages with unsupported tables",
+                        "dropped {} stale cached pages with now-supported elements",
                         stale_entries
                     );
                 }
@@ -89,12 +91,14 @@ impl PageViewer {
         };
     }
 
-    fn contains_stale_table_node(page_component: &PageComponent) -> bool {
+    fn contains_stale_unsupported_node(page_component: &PageComponent) -> bool {
         page_component.page.content.nodes.iter().any(|node| {
             matches!(
                 &node.data,
                 Data::Unsupported(UnsupportedElement::Table)
                     | Data::UnsupportedInline(UnsupportedElement::Table)
+                    | Data::Unsupported(UnsupportedElement::PreformattedText)
+                    | Data::UnsupportedInline(UnsupportedElement::PreformattedText)
             )
         })
     }
